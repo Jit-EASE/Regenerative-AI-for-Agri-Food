@@ -1,4 +1,3 @@
-# Re-generating the Streamlit app, requirements, and adding a README for Jit.
 
 # regenerative_ai_streamlit.py
 # -----------------------------------------------------------------------------
@@ -14,6 +13,12 @@
 # - Agentic AI: OpenAI-backed explainer using local policy context
 # - Transparency tabs: lineage, drift, calibration, and governance readiness
 # -----------------------------------------------------------------------------
+# --- PATCH NOTES (2025-08-26) ---
+# - Fix KeyError on preds[-1] by using positional indexing with .iloc[-1].
+# - Add guards in fit_ols_prob for empty df and missing columns.
+# - Recompute PSI inside Model tab to avoid dependency on Sensor tab execution order.
+# - Governance tab uses safe PSI fallback when Live Sensors hasn't run yet.
+# --------------------------------
 
 import os, json, uuid, time, hashlib, math, textwrap
 from datetime import datetime
@@ -24,7 +29,6 @@ import pandas as pd
 import streamlit as st
 
 # Modeling & stats
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, brier_score_loss
 import statsmodels.api as sm
 
@@ -46,7 +50,7 @@ st.set_page_config(
     layout="wide"
 )
 
-APP_VERSION = "v0.4"
+APP_VERSION = "v0.5"
 DATA_DIR = "./data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -57,7 +61,6 @@ def sha256_of_dict(d: Dict) -> str:
 
 def compute_vpd_celsius(temp_c: float, rh_pct: float) -> float:
     # Simplified VPD approximation (kPa) for demo purposes
-    # es (saturation vapor pressure) in kPa (Tetens)
     es = 0.6108 * math.exp((17.27 * temp_c) / (temp_c + 237.3))
     ea = es * (rh_pct / 100.0)
     vpd = max(es - ea, 0.0)
@@ -117,8 +120,7 @@ def population_stability_index(ref: np.ndarray, cur: np.ndarray, bins:int=10) ->
     # Bin edges on reference
     qs = np.linspace(0, 1, bins + 1)
     edges = np.quantile(ref, qs)
-    # Deduplicate edges if necessary
-    edges = np.unique(edges)
+    edges = np.unique(edges)  # deduplicate
 
     ref_hist, _ = np.histogram(ref, bins=edges)
     cur_hist, _ = np.histogram(cur, bins=edges)
@@ -126,7 +128,6 @@ def population_stability_index(ref: np.ndarray, cur: np.ndarray, bins:int=10) ->
     ref_pct = ref_hist / max(ref_hist.sum(), 1)
     cur_pct = cur_hist / max(cur_hist.sum(), 1)
 
-    # Add small epsilon to avoid log(0)
     eps = 1e-8
     psi = np.sum((cur_pct - ref_pct) * np.log((cur_pct + eps) / (ref_pct + eps)))
     return float(psi)
@@ -137,6 +138,14 @@ def fit_ols_prob(df: pd.DataFrame, target_col="water_stress") -> Dict:
     (In practice, a logistic model would be more appropriate; OLS is used
      to keep the demo simple and show p-values, R^2 updates, etc.)
     """
+    # Guards
+    required = ["vpd", "soil_moist", "ndvi", "temp_c", "rh", target_col]
+    missing = [c for c in required if c not in df.columns]
+    if len(df) == 0:
+        raise ValueError("No data available. Generate a sensor batch first.")
+    if missing:
+        raise KeyError(f"Missing columns: {missing}")
+
     features = ["vpd", "soil_moist", "ndvi", "temp_c", "rh"]
     X = df[features].copy()
     y = df[target_col].astype(float)
@@ -176,6 +185,9 @@ def fit_ols_prob(df: pd.DataFrame, target_col="water_stress") -> Dict:
     else:
         lo, hi = float("nan"), float("nan")
 
+    # Safe positional last prediction (pandas or numpy)
+    last_pred_val = preds.iloc[-1] if hasattr(preds, "iloc") else preds[-1]
+
     return {
         "model": model,
         "features": features,
@@ -183,7 +195,7 @@ def fit_ols_prob(df: pd.DataFrame, target_col="water_stress") -> Dict:
         "r2": float(r2),
         "brier": float(brier),
         "last_pi": (lo, hi),
-        "last_pred": float(preds[-1]),
+        "last_pred": float(last_pred_val),
         "summary": str(model.summary())
     }
 
@@ -229,9 +241,7 @@ def make_decision_artifact(latest_row: pd.Series, model_info: Dict, lineage: Dic
     return artifact
 
 def kb_context() -> List[Dict[str,str]]:
-    """
-    Local, cite-able snippets for the agent to use.
-    """
+    """Local, cite-able snippets for the agent to use."""
     return [
         {"id":"policy_irrigation", "title":"Irrigation Policy v1",
          "text":"Trigger irrigation when modeled water-stress risk > 0.6 and uncertainty band < 0.5, unless VPD drift PSI > 0.2."},
@@ -242,9 +252,7 @@ def kb_context() -> List[Dict[str,str]]:
     ]
 
 def agentic_ai_explain(artifact: Dict, history: List[Dict], kb: List[Dict]) -> Dict:
-    """
-    Calls OpenAI (if available) to produce a structured explanation.
-    """
+    """Calls OpenAI (if available) to produce a structured explanation."""
     if not HAS_OPENAI:
         return {"error":"OpenAI SDK not available in this environment."}
     api_key = os.getenv("OPENAI_API_KEY", "")
@@ -272,7 +280,6 @@ def agentic_ai_explain(artifact: Dict, history: List[Dict], kb: List[Dict]) -> D
             }, ensure_ascii=False)}
         ]
 
-        # Expect a concise JSON response
         schema_hint = textwrap.dedent("""
         Respond as JSON with keys:
         - "rationale": str
@@ -314,7 +321,7 @@ with st.sidebar:
     max_bandwidth = st.slider("Max uncertainty bandwidth", 0.1, 1.0, 0.5, 0.01)
     st.divider()
     generate = st.button("Generate New Batch")
-    st.caption("Note: Agentic AI uses OpenAI (set OPENAI_API_KEY). No data leaves your machine unless you enable it.")
+    st.caption("Agentic AI uses OpenAI (set OPENAI_API_KEY). No data leaves your machine unless you enable it.")
 
 policy = {
     "stress_threshold": float(stress_threshold),
@@ -324,7 +331,7 @@ policy = {
 
 # --------------------------- Main Layout -------------------------------------
 st.title("🫒 Regenerative AI Dashboard — Olive Grove (Prototype)")
-st.write("**Principle:** If we build AI like extraction, we scale fragility. Build it like regeneration and we scale resilience. This demo shows feedback loops, transparency, and graceful degradation.")
+st.write("**Principle:** If we build AI like extraction, we scale fragility. Build it like regeneration and we scale resilience.")
 
 if generate:
     new_df = simulate_batch(batch_size, seed=int(seed), drift=float(drift))
@@ -340,6 +347,8 @@ with tabs[0]:
     st.subheader("Live Sensors & Drift")
     if df.empty:
         st.info("Click **Generate New Batch** to simulate sensors.")
+        # Define default PSI variables to avoid unbound references elsewhere
+        psi_vpd = psi_sm = psi_ndvi = 0.0
     else:
         recent = df.tail(300).copy()
 
@@ -370,11 +379,16 @@ with tabs[1]:
     if df.empty:
         st.info("Generate a batch first.")
     else:
+        # Compute PSI locally (independent of Live Sensors execution path)
+        recent_m = df.tail(300).copy()
+        psi_vpd_m = population_stability_index(baseline["vpd"].values, recent_m["vpd"].values, bins=10)
+        psi_sm_m = population_stability_index(baseline["soil_moist"].values, recent_m["soil_moist"].values, bins=10)
+        psi_ndvi_m = population_stability_index(baseline["ndvi"].values, recent_m["ndvi"].values, bins=10)
+
         model_info = fit_ols_prob(df)
         r2 = model_info["r2"]
         brier = model_info["brier"]
         lo, hi = model_info["last_pi"]
-        last_pred = model_info["last_pred"]
 
         # Calibration (reliability) curve proxy
         tmp = df.copy()
@@ -394,7 +408,11 @@ with tabs[1]:
             st.code(model_info["summary"][:2000])
 
         # Decision Artifact
-        drift_flags = {"psi_vpd": float(psi_vpd), "psi_soil_moist": float(psi_sm), "psi_ndvi": float(psi_ndvi)}
+        drift_flags = {
+            "psi_vpd": float(psi_vpd_m),
+            "psi_soil_moist": float(psi_sm_m),
+            "psi_ndvi": float(psi_ndvi_m)
+        }
         lineage = {
             "data_ts": df["ts_utc"].iloc[-1],
             "batch_size": int(len(df)),
@@ -496,9 +514,10 @@ with tabs[5]:
     has_feedback = len(st.session_state.outcomes) > 0
     transparency_cov = 100.0 if has_lineage else 0.0
     feedback_cov = 100.0 if has_feedback else 0.0
-    # Ensure psi_vpd is defined (fall back to 0 if Live Sensors hasn't run)
+
+    # Safe PSI fallback (in case Live Sensors wasn't executed with data)
     try:
-        _psi_vpd = float(psi_vpd)
+        _psi_vpd = float(psi_vpd)  # may exist from Live Sensors tab
     except Exception:
         _psi_vpd = 0.0
     resilience_index = max(0.0, 1.0 - max(0.0, _psi_vpd - policy["psi_limit"])) * 100.0
@@ -530,4 +549,3 @@ with tabs[5]:
     st.json(mc)
 
 st.caption("© Designed & Developed by Jit — Research Prototype (No real agronomic claims).")
-
