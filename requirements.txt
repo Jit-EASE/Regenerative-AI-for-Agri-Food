@@ -6,3 +6,4 @@ plotly
 scikit-learn
 statsmodels
 openai>=1.0.0
+pulp>=2.8  
