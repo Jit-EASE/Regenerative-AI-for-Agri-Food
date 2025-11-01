@@ -432,106 +432,52 @@ with tabs[0]:
 
         # Geo context (synthetic coordinates around one farm block)
         center = [37.99, 23.73]  # demo coords
-        risk_val = recent["water_stress"].tail(50).mean()
-        layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=pd.DataFrame({"lat":[center[0]], "lon":[center[1]], "size":[1000*risk_val+100]}),
-            get_position='[lon, lat]', get_radius='size', pickable=True
-        )
-        st.pydeck_chart(pdk.Deck(
-            map_style="mapbox://styles/mapbox/light-v9",
-            initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=10, pitch=0),
-            layers=[layer]
-        ))
+        risk_val = float(recent["water_stress"].tail(50).mean())
 
-# --------------------------- Tab 1: Model & Decision ------------------------
-with tabs[1]:
-    st.subheader("Risk Model, Uncertainty & Decision Passport")
-    if df.empty:
-        st.info("Generate a batch first.")
-    else:
-        model = CalibratedLogit().fit(df)
-        preds = model.predict_proba(df)
-        r2 = r2_score(df["water_stress"], preds)
-        brier = brier_score_loss(df["water_stress"], preds)
-        lo, hi = conformal_band(preds, df["water_stress"].values, alpha=0.1)
-        last_pred = float(preds[-1])
-
-        # Calibration plot
-        tmp = df.copy()
-        tmp["pred"] = preds
-        tmp["bin"] = pd.qcut(tmp["pred"], q=10, duplicates="drop")
-        calib = tmp.groupby("bin").agg(obs=("water_stress","mean"), pred=("pred","mean")).dropna().reset_index()
-
-        c1, c2 = st.columns([1,1])
-        with c1:
-            st.metric("R² (risk vs outcome)", f"{r2:.3f}")
-            st.metric("Brier score (lower is better)", f"{brier:.3f}")
-            fig4 = px.scatter(calib, x="pred", y="obs", title="Calibration Curve (binned)")
-            fig4.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="Perfect"))
-            st.plotly_chart(fig4, use_container_width=True)
-        with c2:
-            st.markdown("**Model Summary (Logit)**")
-            st.code(model.summary_[:2000])
-
-        # Importance
-        imps = permutation_importance(model, df, "water_stress")
-        st.markdown("**Permutation Importance (∆Brier; higher = more important)**")
-        st.bar_chart(pd.Series(imps))
-
-        # Drift proxies for decision gating
-        recent_m = df.tail(300)
-        psi_vpd_m = population_stability_index(baseline["vpd"].values, recent_m["vpd"].values, bins=10)
-        psi_sm_m = population_stability_index(baseline["soil_moist"].values, recent_m["soil_moist"].values, bins=10)
-        psi_ndvi_m = population_stability_index(baseline["ndvi"].values, recent_m["ndvi"].values, bins=10)
-
-        # Decision
-        action = "irrigate_now"
-        fallback_used = False
-        if not (np.isfinite(lo) and np.isfinite(hi)) or (hi - lo) > policy["max_bandwidth"]:
-            action = "defer_and_observe"; fallback_used = True
-        if psi_vpd_m > policy["psi_limit"]:
-            action = "conservative_plan"; fallback_used = True
-        if last_pred < policy["stress_threshold"]:
-            action = "defer_and_observe"
-
-        inputs = df.iloc[-1][["temp_c","rh","soil_moist","ndvi","vpd"]].to_dict()
-        lineage = {
-            "data_ts": df["ts_utc"].iloc[-1],
-            "batch_size": int(len(df)),
-            "generator_seed": int(seed),
-            "app_version": APP_VERSION,
-            "federated_mode": bool(federated)
-        }
-        drift_flags = {"psi_vpd":float(psi_vpd_m), "psi_soil_moist":float(psi_sm_m), "psi_ndvi":float(psi_ndvi_m)}
-        artifact = {
-            "decision_id": str(uuid.uuid4()),
-            "ts_utc": datetime.utcnow().isoformat(),
-            "action": action,
-            "prediction": last_pred,
-            "confidence_bounds": [lo, hi],
-            "model_version": f"logit-{APP_VERSION}",
-            "inputs_hash": sha256_of_dict(inputs),
-            "inputs": inputs,
-            "explanation": "Primary drivers: VPD↑ increases stress; Soil moisture↓ increases stress; NDVI↓ indicates canopy stress.",
-            "lineage": lineage,
-            "risk_checks": {"drift": drift_flags, "uncertainty_band": (hi-lo if (np.isfinite(hi) and np.isfinite(lo)) else None)},
-            "policy": policy,
-            "fallback_used": fallback_used
-        }
-        st.markdown("#### Decision Artifact (Passport)")
-        st.json(artifact)
-
-        # Auto NLP explanation
-        extras = {"imps": imps, "metrics": {"r2": r2, "brier": brier}}
-        nlp = auto_nlp_explanation(artifact, extras)
-        st.markdown("**Auto Explanation (Operator-facing)**")
-        st.write(nlp.get("rationale",""))
-        st.markdown("**Checklist**")
-        st.write(nlp.get("operator_checklist", []))
-        st.markdown("**Residual Risks**")
-        st.write(nlp.get("residual_risks", []))
-        st.caption("Citations: "+", ".join(nlp.get("citations", [])))
+        # Mapbox token handling + CARTO fallback
+        MAPBOX_TOKEN = os.getenv("MAPBOX_API_KEY", os.getenv("MAPBOX_TOKEN", ""))
+        if MAPBOX_TOKEN:
+            try:
+                import pydeck as pdk
+                pdk.settings.mapbox_api_key = MAPBOX_TOKEN
+                layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=pd.DataFrame({"lat":[center[0]], "lon":[center[1]], "size":[1000*risk_val+200]}),
+                    get_position='[lon, lat]', get_radius='size', pickable=True
+                )
+                deck = pdk.Deck(
+                    map_style="mapbox://styles/mapbox/light-v9",
+                    initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=10, pitch=0),
+                    layers=[layer]
+                )
+                st.pydeck_chart(deck, use_container_width=True)
+            except Exception as _e:
+                MAPBOX_TOKEN = ""  # force fallback
+        if not MAPBOX_TOKEN:
+            # CARTO provider (no token required) or Scattergeo fallback
+            try:
+                import pydeck as pdk
+                layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=pd.DataFrame({"lat":[center[0]], "lon":[center[1]], "size":[1000*risk_val+200]}),
+                    get_position='[lon, lat]', get_radius='size', pickable=True
+                )
+                deck = pdk.Deck(
+                    map_provider="carto", map_style="light",
+                    initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=10, pitch=0),
+                    layers=[layer]
+                )
+                st.pydeck_chart(deck, use_container_width=True)
+            except Exception:
+                # Plotly geo fallback (no tiles needed)
+                import plotly.graph_objects as go
+                fig_geo = go.Figure(go.Scattergeo(
+                    lon=[center[1]], lat=[center[0]], mode='markers',
+                    marker=dict(size=12 + 20*risk_val)
+                ))
+                fig_geo.update_geos(projection_type='equirectangular', showcountries=True, showcoastlines=True)
+                fig_geo.update_layout(margin=dict(l=0,r=0,t=0,b=0))
+                st.plotly_chart(fig_geo, use_container_width=True)
 
         # Memory commit
         if st.button("Commit Decision to Memory"):
