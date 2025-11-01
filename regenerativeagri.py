@@ -430,54 +430,76 @@ with tabs[0]:
         c8.metric("KS p(SM)", f"{ks_sm_p:.3f}")
         c9.metric("KS p(NDVI)", f"{ks_ndvi_p:.3f}")
 
-        # Geo context (synthetic coordinates around one farm block)
-        center = [37.99, 23.73]  # demo coords
+        # Geo context (Ireland agricultural lands focus)
+        # Center on Ireland's agricultural heartland (approx Midlands)
+        center = [53.40, -7.80]
         risk_val = float(recent["water_stress"].tail(50).mean())
+
+        # Generate synthetic farm points across Ireland bounding box (approx)
+        rng = np.random.default_rng(21)
+        n_pts = 600
+        lats = rng.uniform(51.4, 55.5, n_pts)
+        lons = rng.uniform(-10.5, -5.4, n_pts)
+        # weight points using recent signals to imitate stress hotspots
+        weights = (recent["vpd"].tail(n_pts).values if len(recent)>=n_pts else
+                   rng.uniform(0.5,1.5,n_pts))
+        farms = pd.DataFrame({"lat":lats, "lon":lons, "weight":weights})
 
         # Mapbox token handling + CARTO fallback
         MAPBOX_TOKEN = os.getenv("MAPBOX_API_KEY", os.getenv("MAPBOX_TOKEN", ""))
-        if MAPBOX_TOKEN:
-            try:
-                import pydeck as pdk
+        try:
+            import pydeck as pdk
+            if MAPBOX_TOKEN:
                 pdk.settings.mapbox_api_key = MAPBOX_TOKEN
-                layer = pdk.Layer(
-                    "ScatterplotLayer",
-                    data=pd.DataFrame({"lat":[center[0]], "lon":[center[1]], "size":[1000*risk_val+200]}),
-                    get_position='[lon, lat]', get_radius='size', pickable=True
-                )
                 deck = pdk.Deck(
                     map_style="mapbox://styles/mapbox/light-v9",
-                    initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=10, pitch=0),
-                    layers=[layer]
+                    initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=6.2, pitch=0),
+                    layers=[
+                        pdk.Layer(
+                            "HexagonLayer",
+                            data=farms,
+                            get_position='[lon, lat]',
+                            elevation_scale=30,
+                            elevation_range=[0, 2000],
+                            extruded=True,
+                            pickable=True,
+                            get_elevation="weight"
+                        ),
+                        pdk.Layer(
+                            "ScatterplotLayer",
+                            data=pd.DataFrame({"lat":[center[0]], "lon":[center[1]], "size":[1000*risk_val+300]}),
+                            get_position='[lon, lat]', get_radius='size', pickable=True
+                        )
+                    ]
                 )
                 st.pydeck_chart(deck, use_container_width=True)
-            except Exception as _e:
-                MAPBOX_TOKEN = ""  # force fallback
-        if not MAPBOX_TOKEN:
-            # CARTO provider (no token required) or Scattergeo fallback
-            try:
-                import pydeck as pdk
-                layer = pdk.Layer(
-                    "ScatterplotLayer",
-                    data=pd.DataFrame({"lat":[center[0]], "lon":[center[1]], "size":[1000*risk_val+200]}),
-                    get_position='[lon, lat]', get_radius='size', pickable=True
-                )
+            else:
+                # CARTO provider (no token)
                 deck = pdk.Deck(
                     map_provider="carto", map_style="light",
-                    initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=10, pitch=0),
-                    layers=[layer]
+                    initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=6.2, pitch=0),
+                    layers=[
+                        pdk.Layer(
+                            "HexagonLayer", data=farms, get_position='[lon, lat]',
+                            elevation_scale=30, elevation_range=[0, 2000], extruded=True, pickable=True,
+                            get_elevation="weight"
+                        )
+                    ]
                 )
                 st.pydeck_chart(deck, use_container_width=True)
-            except Exception:
-                # Plotly geo fallback (no tiles needed)
-                import plotly.graph_objects as go
-                fig_geo = go.Figure(go.Scattergeo(
-                    lon=[center[1]], lat=[center[0]], mode='markers',
-                    marker=dict(size=12 + 20*risk_val)
-                ))
-                fig_geo.update_geos(projection_type='equirectangular', showcountries=True, showcoastlines=True)
-                fig_geo.update_layout(margin=dict(l=0,r=0,t=0,b=0))
-                st.plotly_chart(fig_geo, use_container_width=True)
+        except Exception:
+            # Plotly geo fallback (Ireland bbox)
+            import plotly.graph_objects as go
+            fig_geo = go.Figure(go.Scattergeo(
+                lon=farms["lon"], lat=farms["lat"], mode='markers',
+                marker=dict(size=4)
+            ))
+            fig_geo.update_geos(
+                projection_type='equirectangular', showcountries=True, showcoastlines=True,
+                lataxis_range=[51.0,56.0], lonaxis_range=[-11.0,-5.0]
+            )
+            fig_geo.update_layout(margin=dict(l=0,r=0,t=0,b=0))
+            st.plotly_chart(fig_geo, use_container_width=True)
 
         # Memory commit
         if st.button("Commit Decision to Memory"):
