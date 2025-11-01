@@ -50,8 +50,8 @@ except Exception:
 
 # --------------------------- App Config --------------------------------------
 st.set_page_config(
-    page_title="Regenerative AI Dashboard — Olive Grove (Research Prototype)",
-    page_icon="🫒",
+    page_title="Regenerative AI in Agriculture - Ireland",
+    page_icon=" ",
     layout="wide"
 )
 
