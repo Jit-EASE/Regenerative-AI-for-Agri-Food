@@ -147,12 +147,17 @@ class CalibratedLogit:
         y = df[target].astype(int)
         self.logit = sm.Logit(y, X).fit(disp=False)
         raw = self.logit.predict(X)
-        # Simple time-aware folds by index quantiles
-        folds = pd.qcut(df.index, q=min(5, max(2, len(df)//50)), duplicates="drop")
+        # Time-aware folds as integer labels to avoid Categorical .iloc issues
+        k = int(min(5, max(2, len(df)//50))) if len(df) >= 10 else 2
+        fold_labels = pd.Series(np.floor(np.linspace(0, k-1, len(df))).astype(int), index=df.index)
         # Train calibration on all but last fold
-        mask = folds != folds.iloc[-1]
+        mask = fold_labels != fold_labels.iloc[-1]
         self.cal = IsotonicRegression(out_of_bounds="clip")
-        self.cal.fit(raw[mask], y[mask])
+        if mask.sum() < 2:
+            # Fallback to identity calibration when not enough samples in training folds
+            self.cal.fit(np.array([0.0, 1.0]), np.array([0.0, 1.0]))
+        else:
+            self.cal.fit(raw[mask], y[mask])
         self.summary_ = str(self.logit.summary())
         return self
 
