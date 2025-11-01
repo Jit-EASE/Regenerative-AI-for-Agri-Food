@@ -430,25 +430,52 @@ with tabs[0]:
         c8.metric("KS p(SM)", f"{ks_sm_p:.3f}")
         c9.metric("KS p(NDVI)", f"{ks_ndvi_p:.3f}")
 
-        # Geo context (Ireland agricultural lands focus)
-        # Center on Ireland's agricultural heartland (approx Midlands)
+        # Geo context (Ireland agricultural lands focus via county centroids)
+        # Exact(ish) centroids for ROI counties to ensure markers are on land
+        county_centroids = [
+            {"county":"Carlow", "lat":52.72, "lon":-6.64},
+            {"county":"Cavan", "lat":53.99, "lon":-7.36},
+            {"county":"Clare", "lat":52.86, "lon":-9.15},
+            {"county":"Cork", "lat":52.04, "lon":-8.70},
+            {"county":"Donegal", "lat":54.90, "lon":-7.72},
+            {"county":"Dublin", "lat":53.33, "lon":-6.23},
+            {"county":"Galway", "lat":53.35, "lon":-8.90},
+            {"county":"Kerry", "lat":52.14, "lon":-9.70},
+            {"county":"Kildare", "lat":53.16, "lon":-6.74},
+            {"county":"Kilkenny", "lat":52.65, "lon":-7.25},
+            {"county":"Laois", "lat":53.03, "lon":-7.30},
+            {"county":"Leitrim", "lat":54.30, "lon":-8.00},
+            {"county":"Limerick", "lat":52.66, "lon":-8.63},
+            {"county":"Longford", "lat":53.73, "lon":-7.80},
+            {"county":"Louth", "lat":53.95, "lon":-6.54},
+            {"county":"Mayo", "lat":53.95, "lon":-9.25},
+            {"county":"Meath", "lat":53.60, "lon":-6.65},
+            {"county":"Monaghan", "lat":54.26, "lon":-6.94},
+            {"county":"Offaly", "lat":53.24, "lon":-7.64},
+            {"county":"Roscommon", "lat":53.63, "lon":-8.19},
+            {"county":"Sligo", "lat":54.27, "lon":-8.47},
+            {"county":"Tipperary", "lat":52.68, "lon":-7.88},
+            {"county":"Waterford", "lat":52.26, "lon":-7.11},
+            {"county":"Westmeath", "lat":53.53, "lon":-7.43},
+            {"county":"Wexford", "lat":52.33, "lon":-6.46},
+            {"county":"Wicklow", "lat":52.99, "lon":-6.35}
+        ]
+        farms = pd.DataFrame(county_centroids)
+
+        # Weight counties using recent signals to imitate stress hotspots
+        if len(recent) >= len(farms):
+            farms["weight"] = recent["vpd"].tail(len(farms)).values
+        else:
+            farms["weight"] = np.linspace(0.8, 1.2, len(farms))
+
+        # Center on Ireland Midlands
         center = [53.40, -7.80]
         risk_val = float(recent["water_stress"].tail(50).mean())
 
-        # Generate synthetic farm points across Ireland bounding box (approx)
-        rng = np.random.default_rng(21)
-        n_pts = 600
-        lats = rng.uniform(51.4, 55.5, n_pts)
-        lons = rng.uniform(-10.5, -5.4, n_pts)
-        # weight points using recent signals to imitate stress hotspots
-        weights = (recent["vpd"].tail(n_pts).values if len(recent)>=n_pts else
-                   rng.uniform(0.5,1.5,n_pts))
-        farms = pd.DataFrame({"lat":lats, "lon":lons, "weight":weights})
-
-        # Mapbox token handling + CARTO fallback
         MAPBOX_TOKEN = os.getenv("MAPBOX_API_KEY", os.getenv("MAPBOX_TOKEN", ""))
         try:
             import pydeck as pdk
+            tooltip = {"html": "<b>{county}</b><br/>Weight: {weight}", "style": {"backgroundColor": "steelblue", "color": "white"}}
             if MAPBOX_TOKEN:
                 pdk.settings.mapbox_api_key = MAPBOX_TOKEN
                 deck = pdk.Deck(
@@ -456,43 +483,37 @@ with tabs[0]:
                     initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=6.2, pitch=0),
                     layers=[
                         pdk.Layer(
-                            "HexagonLayer",
+                            "ScatterplotLayer",
                             data=farms,
                             get_position='[lon, lat]',
-                            elevation_scale=30,
-                            elevation_range=[0, 2000],
-                            extruded=True,
-                            pickable=True,
-                            get_elevation="weight"
-                        ),
-                        pdk.Layer(
-                            "ScatterplotLayer",
-                            data=pd.DataFrame({"lat":[center[0]], "lon":[center[1]], "size":[1000*risk_val+300]}),
-                            get_position='[lon, lat]', get_radius='size', pickable=True
+                            get_radius='(1000 * weight) + 300',
+                            pickable=True
                         )
-                    ]
+                    ],
+                    tooltip=tooltip
                 )
                 st.pydeck_chart(deck, use_container_width=True)
             else:
-                # CARTO provider (no token)
                 deck = pdk.Deck(
                     map_provider="carto", map_style="light",
                     initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=6.2, pitch=0),
                     layers=[
                         pdk.Layer(
-                            "HexagonLayer", data=farms, get_position='[lon, lat]',
-                            elevation_scale=30, elevation_range=[0, 2000], extruded=True, pickable=True,
-                            get_elevation="weight"
+                            "ScatterplotLayer",
+                            data=farms,
+                            get_position='[lon, lat]',
+                            get_radius='(1000 * weight) + 300',
+                            pickable=True
                         )
-                    ]
+                    ],
+                    tooltip=tooltip
                 )
                 st.pydeck_chart(deck, use_container_width=True)
         except Exception:
-            # Plotly geo fallback (Ireland bbox)
             import plotly.graph_objects as go
             fig_geo = go.Figure(go.Scattergeo(
-                lon=farms["lon"], lat=farms["lat"], mode='markers',
-                marker=dict(size=4)
+                lon=farms["lon"], lat=farms["lat"], text=farms["county"], mode='markers',
+                marker=dict(size=8)
             ))
             fig_geo.update_geos(
                 projection_type='equirectangular', showcountries=True, showcoastlines=True,
