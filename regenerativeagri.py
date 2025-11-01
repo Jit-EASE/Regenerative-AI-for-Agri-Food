@@ -339,7 +339,7 @@ if "audit" not in st.session_state:
 
 # --------------------------- Sidebar -----------------------------------------
 with st.sidebar:
-    st.markdown("## 🫒 Regenerative AI — Controls")
+    st.markdown("## Regenerative AI — Controls")
     st.caption(f"Version: {APP_VERSION} · Designed & Developed by Jit")
     seed = st.number_input("Random seed", value=42, step=1)
     batch_size = st.slider("Batch size", 25, 500, 120, 5)
@@ -361,7 +361,7 @@ policy = {
 }
 
 # --------------------------- Main Layout -------------------------------------
-st.title("🫒 Regenerative AI Dashboard — Olive Grove (Research Prototype)")
+st.title("Regenerative AI in Agriculture - Ireland")
 st.write("**Principle:** If we build AI like extraction, we scale fragility. Build it like regeneration and we scale resilience.")
 
 if generate:
