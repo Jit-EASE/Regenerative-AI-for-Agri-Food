@@ -468,6 +468,14 @@ with tabs[0]:
         else:
             farms["weight"] = np.linspace(0.8, 1.2, len(farms))
 
+        # NLP hover explanation per county (local, non-OpenAI)
+        def _nlp_hover(row):
+            w = float(row.get("weight", 1.0))
+            qualitative = "low" if w < 0.9 else ("moderate" if w < 1.1 else "elevated")
+            note = "Consider observation only" if qualitative == "low" else ("Monitor closely" if qualitative == "moderate" else "Prepare irrigation plan")
+            return f"<b>{row['county']}</b><br/>Signal: {qualitative} (w={w:.2f})<br/>Guidance: {note}<br/>Policy: stress>{policy['stress_threshold']:.2f} & band<{policy['max_bandwidth']:.2f}, PSI<{policy['psi_limit']:.2f}>"
+        farms["nlp"] = farms.apply(_nlp_hover, axis=1)
+
         # Center on Ireland Midlands
         center = [53.40, -7.80]
         risk_val = float(recent["water_stress"].tail(50).mean())
@@ -475,7 +483,7 @@ with tabs[0]:
         MAPBOX_TOKEN = os.getenv("MAPBOX_API_KEY", os.getenv("MAPBOX_TOKEN", ""))
         try:
             import pydeck as pdk
-            tooltip = {"html": "<b>{county}</b><br/>Weight: {weight}", "style": {"backgroundColor": "steelblue", "color": "white"}}
+            tooltip = {"html": "{nlp}", "style": {"backgroundColor": "#0f172a", "color": "#fff"}}
             if MAPBOX_TOKEN:
                 pdk.settings.mapbox_api_key = MAPBOX_TOKEN
                 deck = pdk.Deck(
