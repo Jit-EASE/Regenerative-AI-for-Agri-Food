@@ -361,7 +361,7 @@ policy = {
 }
 
 # --------------------------- Main Layout -------------------------------------
-st.title("🫒 Regenerative AI Dashboard — Olive Grove (Research Prototype)")
+st.title("Regenerative AI in Agriculture - Ireland")
 st.write("**Principle:** If we build AI like extraction, we scale fragility. Build it like regeneration and we scale resilience.")
 
 if generate:
