@@ -50,8 +50,8 @@ except Exception:
 
 # --------------------------- App Config --------------------------------------
 st.set_page_config(
-    page_title="Regenerative AI in Agriculture - Ireland",
-    page_icon=" ",
+    page_title="Regenerative AI Dashboard — Olive Grove (Research Prototype)",
+    page_icon="🫒",
     layout="wide"
 )
 
@@ -339,7 +339,7 @@ if "audit" not in st.session_state:
 
 # --------------------------- Sidebar -----------------------------------------
 with st.sidebar:
-    st.markdown("## Regenerative AI — Controls")
+    st.markdown("## 🫒 Regenerative AI — Controls")
     st.caption(f"Version: {APP_VERSION} · Designed & Developed by Jit")
     seed = st.number_input("Random seed", value=42, step=1)
     batch_size = st.slider("Batch size", 25, 500, 120, 5)
@@ -361,7 +361,7 @@ policy = {
 }
 
 # --------------------------- Main Layout -------------------------------------
-st.title("Regenerative AI in Agriculture - Ireland")
+st.title("🫒 Regenerative AI Dashboard — Olive Grove (Research Prototype)")
 st.write("**Principle:** If we build AI like extraction, we scale fragility. Build it like regeneration and we scale resilience.")
 
 if generate:
@@ -529,6 +529,95 @@ with tabs[0]:
             )
             fig_geo.update_layout(margin=dict(l=0,r=0,t=0,b=0))
             st.plotly_chart(fig_geo, use_container_width=True)
+
+# --------------------------- Tab 1: Model & Decision ------------------------
+with tabs[1]:
+    st.subheader("Risk Model, Uncertainty & Decision Passport")
+    if df.empty:
+        st.info("Generate a batch first.")
+    else:
+        model = CalibratedLogit().fit(df)
+        preds = model.predict_proba(df)
+        r2 = r2_score(df["water_stress"], preds)
+        brier = brier_score_loss(df["water_stress"], preds)
+        lo, hi = conformal_band(preds, df["water_stress"].values, alpha=0.1)
+        last_pred = float(preds[-1])
+
+        # Calibration plot
+        tmp = df.copy()
+        tmp["pred"] = preds
+        tmp["bin"] = pd.qcut(tmp["pred"], q=10, duplicates="drop")
+        calib = tmp.groupby("bin").agg(obs=("water_stress","mean"), pred=("pred","mean")).dropna().reset_index()
+
+        c1, c2 = st.columns([1,1])
+        with c1:
+            st.metric("R² (risk vs outcome)", f"{r2:.3f}")
+            st.metric("Brier score (lower is better)", f"{brier:.3f}")
+            fig4 = px.scatter(calib, x="pred", y="obs", title="Calibration Curve (binned)")
+            fig4.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines", name="Perfect"))
+            st.plotly_chart(fig4, use_container_width=True)
+        with c2:
+            st.markdown("**Model Summary (Logit)**")
+            st.code(model.summary_[:2000])
+
+        # Importance
+        imps = permutation_importance(model, df, "water_stress")
+        st.markdown("**Permutation Importance (∆Brier; higher = more important)**")
+        st.bar_chart(pd.Series(imps))
+
+        # Drift proxies for decision gating
+        recent_m = df.tail(300)
+        psi_vpd_m = population_stability_index(baseline["vpd"].values, recent_m["vpd"].values, bins=10)
+        psi_sm_m = population_stability_index(baseline["soil_moist"].values, recent_m["soil_moist"].values, bins=10)
+        psi_ndvi_m = population_stability_index(baseline["ndvi"].values, recent_m["ndvi"].values, bins=10)
+
+        # Decision
+        action = "irrigate_now"
+        fallback_used = False
+        if not (np.isfinite(lo) and np.isfinite(hi)) or (hi - lo) > policy["max_bandwidth"]:
+            action = "defer_and_observe"; fallback_used = True
+        if psi_vpd_m > policy["psi_limit"]:
+            action = "conservative_plan"; fallback_used = True
+        if last_pred < policy["stress_threshold"]:
+            action = "defer_and_observe"
+
+        inputs = df.iloc[-1][["temp_c","rh","soil_moist","ndvi","vpd"]].to_dict()
+        lineage = {
+            "data_ts": df["ts_utc"].iloc[-1],
+            "batch_size": int(len(df)),
+            "generator_seed": int(seed),
+            "app_version": APP_VERSION,
+            "federated_mode": bool(federated)
+        }
+        drift_flags = {"psi_vpd":float(psi_vpd_m), "psi_soil_moist":float(psi_sm_m), "psi_ndvi":float(psi_ndvi_m)}
+        artifact = {
+            "decision_id": str(uuid.uuid4()),
+            "ts_utc": datetime.utcnow().isoformat(),
+            "action": action,
+            "prediction": last_pred,
+            "confidence_bounds": [lo, hi],
+            "model_version": f"logit-{APP_VERSION}",
+            "inputs_hash": sha256_of_dict(inputs),
+            "inputs": inputs,
+            "explanation": "Primary drivers: VPD↑ increases stress; Soil moisture↓ increases stress; NDVI↓ indicates canopy stress.",
+            "lineage": lineage,
+            "risk_checks": {"drift": drift_flags, "uncertainty_band": (hi-lo if (np.isfinite(hi) and np.isfinite(lo)) else None)},
+            "policy": policy,
+            "fallback_used": fallback_used
+        }
+        st.markdown("#### Decision Artifact (Passport)")
+        st.json(artifact)
+
+        # Auto NLP explanation
+        extras = {"imps": imps, "metrics": {"r2": r2, "brier": brier}}
+        nlp = auto_nlp_explanation(artifact, extras)
+        st.markdown("**Auto Explanation (Operator-facing)**")
+        st.write(nlp.get("rationale",""))
+        st.markdown("**Checklist**")
+        st.write(nlp.get("operator_checklist", []))
+        st.markdown("**Residual Risks**")
+        st.write(nlp.get("residual_risks", []))
+        st.caption("Citations: "+", ".join(nlp.get("citations", [])))
 
         # Memory commit
         if st.button("Commit Decision to Memory"):
